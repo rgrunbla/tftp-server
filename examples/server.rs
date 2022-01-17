@@ -5,9 +5,9 @@ extern crate tftp_server;
 
 use getopts::Options;
 use std::env;
-use std::net::SocketAddr;
+use std::net::{SocketAddr, SocketAddrV6};
 use std::path::PathBuf;
-use std::str::FromStr;
+
 use tftp_server::server::TftpServerBuilder;
 
 fn main() {
@@ -31,14 +31,11 @@ fn main() {
         print!("{}", opts.usage(&brief));
         return;
     }
+    let socket_addr = SocketAddr::V6(SocketAddrV6::new("::".parse().unwrap(), 69, 0, 2));
 
-    let socket_addr = matches
-        .opt_str("p")
-        .map(|p| format!("127.0.0.1:{}", p))
-        .map(|addr| SocketAddr::from_str(addr.as_str()).expect("Error parsing address"));
-    let dir = matches.opt_str("d").map(|s| PathBuf::from(s));
+    let dir = matches.opt_str("d").map(PathBuf::from);
     let mut server = TftpServerBuilder::new()
-        .addr_opt(socket_addr)
+        .addr_opt(Some(socket_addr))
         .serve_dir_opt(dir)
         .build()
         .expect("Error creating server");

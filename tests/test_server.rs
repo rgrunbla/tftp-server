@@ -3,12 +3,14 @@ extern crate log;
 extern crate env_logger;
 extern crate tftp_server;
 
+use rand::Rng;
 use std::fs;
 use std::fs::File;
 use std::io;
 use std::io::{Read, Write};
-use std::net::SocketAddr;
+use std::net::{Ipv6Addr, SocketAddr, SocketAddrV6};
 use std::path::PathBuf;
+use std::str::FromStr;
 use std::thread;
 use std::time::Duration;
 use tftp_server::packet::{DataBytes, ErrorCode, Packet, PacketData, MAX_PACKET_SIZE};
@@ -18,13 +20,23 @@ const TIMEOUT: u64 = 3;
 
 /// Starts the server in a new thread.
 pub fn start_server(server_dir: Option<PathBuf>) -> Result<SocketAddr> {
-    let mut server = TftpServerBuilder::new().serve_dir_opt(server_dir).build()?;
+    let port = rand::thread_rng().gen_range(0, 65535);
+    let socket = SocketAddr::V6(SocketAddrV6::new(
+        Ipv6Addr::from_str("::1").unwrap(),
+        port,
+        0,
+        0,
+    ));
+
+    let mut server = TftpServerBuilder::new()
+        .serve_dir_opt(server_dir)
+        .addr_opt(Some(socket))
+        .build()?;
     let addr = server.local_addr()?;
     thread::spawn(move || {
         if let Err(e) = server.run() {
             println!("Error with server: {:?}", e);
         }
-        ()
     });
 
     Ok(addr)
@@ -42,7 +54,7 @@ pub fn check_similar_files(file1: &mut File, file2: &mut File) -> Result<()> {
 }
 
 fn timeout_test(server_addr: &SocketAddr) -> Result<()> {
-    let socket = create_socket(None)?;
+    let socket = create_socket(None, *server_addr)?;
     let init_packet = Packet::WRQ {
         filename: "hello.txt".to_string(),
         mode: "octet".to_string(),
@@ -71,7 +83,7 @@ fn wrq_initial_ack_test(server_addr: &SocketAddr) -> Result<()> {
     };
     let expected = Packet::ACK(0);
 
-    let socket = create_socket(Some(Duration::from_secs(TIMEOUT)))?;
+    let socket = create_socket(Some(Duration::from_secs(TIMEOUT)), *server_addr)?;
     socket.send_to(input.bytes()?.to_slice(), server_addr)?;
 
     let mut buf = [0; MAX_PACKET_SIZE];
@@ -98,7 +110,7 @@ fn rrq_initial_data_test(server_addr: &SocketAddr) -> Result<()> {
         len: amount,
     };
 
-    let socket = create_socket(Some(Duration::from_secs(TIMEOUT)))?;
+    let socket = create_socket(Some(Duration::from_secs(TIMEOUT)), *server_addr)?;
     socket.send_to(input.bytes()?.to_slice(), server_addr)?;
 
     let mut buf = [0; MAX_PACKET_SIZE];
@@ -108,7 +120,7 @@ fn rrq_initial_data_test(server_addr: &SocketAddr) -> Result<()> {
 }
 
 fn wrq_whole_file_test(server_addr: &SocketAddr) -> Result<()> {
-    let socket = create_socket(Some(Duration::from_secs(TIMEOUT)))?;
+    let socket = create_socket(Some(Duration::from_secs(TIMEOUT)), *server_addr)?;
     let init_packet = Packet::WRQ {
         filename: "hello.txt".to_string(),
         mode: "octet".to_string(),
@@ -136,7 +148,7 @@ fn wrq_whole_file_test(server_addr: &SocketAddr) -> Result<()> {
                 Ok(i) => i,
             };
             let data_packet = Packet::DATA {
-                block_num: block_num,
+                block_num,
                 data: DataBytes(buf),
                 len: amount,
             };
@@ -156,7 +168,7 @@ fn wrq_whole_file_test(server_addr: &SocketAddr) -> Result<()> {
 }
 
 fn rrq_whole_file_test(server_addr: &SocketAddr) -> Result<()> {
-    let socket = create_socket(Some(Duration::from_secs(TIMEOUT)))?;
+    let socket = create_socket(Some(Duration::from_secs(TIMEOUT)), *server_addr)?;
     let init_packet = Packet::RRQ {
         filename: "./files/hello.txt".to_string(),
         mode: "octet".to_string(),
@@ -179,7 +191,7 @@ fn rrq_whole_file_test(server_addr: &SocketAddr) -> Result<()> {
             } = reply_packet
             {
                 assert_eq!(client_block_num, block_num);
-                file.write(&data.0[0..len])?;
+                file.write_all(&data.0[0..len])?;
 
                 let ack_packet = Packet::ACK(client_block_num);
                 socket.send_to(ack_packet.bytes()?.to_slice(), &src)?;
@@ -215,7 +227,7 @@ fn packet_error_test(
     server_addr: &SocketAddr,
     error_code: ErrorCode,
 ) -> Result<()> {
-    let socket = create_socket(None)?;
+    let socket = create_socket(None, *server_addr)?;
     socket.send_to(packet.bytes()?.to_slice(), server_addr)?;
 
     let mut buf = [0; MAX_PACKET_SIZE];
@@ -275,10 +287,10 @@ fn illegal_home_test(server_addr: &SocketAddr) -> Result<()> {
 fn main() {
     env_logger::init().unwrap();
     let server_addr = start_server(None).unwrap();
-    thread::sleep(Duration::from_millis(1000));
+    thread::sleep(Duration::from_millis(2000));
     wrq_initial_ack_test(&server_addr).unwrap();
     rrq_initial_data_test(&server_addr).unwrap();
-    thread::sleep(Duration::from_millis(1000));
+    thread::sleep(Duration::from_millis(2000));
     wrq_whole_file_test(&server_addr).unwrap();
     rrq_whole_file_test(&server_addr).unwrap();
     timeout_test(&server_addr).unwrap();

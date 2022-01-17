@@ -1,6 +1,6 @@
 use crate::packet::{DataBytes, ErrorCode, Packet, PacketData, PacketErr, MAX_PACKET_SIZE};
 use log::{error, info};
-use mio::udp::UdpSocket;
+use mio::net::UdpSocket;
 use mio::*;
 use mio_extras::timer::{Timeout, Timer};
 use rand;
@@ -15,7 +15,7 @@ use std::net;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::result;
-use std::str::FromStr;
+
 use std::time::Duration;
 use std::u16;
 
@@ -46,6 +46,7 @@ pub enum TftpError {
     /// of the source address when receiving from a socket.
     /// This error should be ignored by the server.
     NoneFromSocket,
+    NoAddressError,
 }
 
 impl From<io::Error> for TftpError {
@@ -92,6 +93,13 @@ pub struct TftpServerBuilder {
 }
 
 impl TftpServerBuilder {
+    pub fn default() -> TftpServerBuilder {
+        TftpServerBuilder {
+            addr: None,
+            serve_dir: None,
+        }
+    }
+
     pub fn new() -> TftpServerBuilder {
         TftpServerBuilder {
             addr: None,
@@ -121,7 +129,10 @@ impl TftpServerBuilder {
         let poll = Poll::new()?;
         let socket = match self.addr {
             Some(addr) => UdpSocket::bind(&addr)?,
-            None => UdpSocket::from_socket(create_socket(Some(Duration::from_secs(TIMEOUT)))?)?,
+            None => {
+                error!("Please specify the address on which the server should operate");
+                return Err(TftpError::NoAddressError);
+            }
         };
         let timer = Timer::default();
         poll.register(&socket, SERVER, Ready::all(), PollOpt::edge())?;
@@ -142,6 +153,11 @@ impl TftpServerBuilder {
     }
 }
 
+impl Default for TftpServerBuilder {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 pub struct TftpServer {
     /// The ID of a new token used for generating different tokens.
     new_token: usize,
@@ -192,10 +208,13 @@ impl TftpServer {
     /// or a DATA packet depending on the whether it received an RRQ or a WRQ packet.
     fn handle_server_packet(&mut self) -> Result<()> {
         let mut buf = [0; MAX_PACKET_SIZE];
-        let (amt, src) = match self.socket.recv_from(&mut buf)? {
-            Some((amt, src)) => (amt, src),
-            None => return Err(TftpError::NoneFromSocket),
+        let (amt, src) = match self.socket.recv_from(&mut buf) {
+            Ok((amt, src)) => (amt, src),
+            Err(_) => {
+                return Err(TftpError::NoneFromSocket);
+            }
         };
+
         let packet = Packet::read(PacketData::new(buf, amt))?;
 
         // Handle the RRQ or WRQ packet.
@@ -210,7 +229,10 @@ impl TftpServer {
         };
 
         // Create new connection.
-        let socket = UdpSocket::from_socket(create_socket(Some(Duration::from_secs(TIMEOUT)))?)?;
+        let socket = UdpSocket::from_socket(create_socket(
+            Some(Duration::from_secs(TIMEOUT)),
+            self.socket.local_addr()?,
+        )?)?;
         let token = self.generate_token();
         let timeout = self.timer.set_timeout(Duration::from_secs(TIMEOUT), token);
         self.poll
@@ -258,9 +280,9 @@ impl TftpServer {
     fn handle_connection_packet(&mut self, token: Token) -> Result<()> {
         if let Some(ref mut conn) = self.connections.get_mut(&token) {
             let mut buf = [0; MAX_PACKET_SIZE];
-            let amt = match conn.conn.recv_from(&mut buf)? {
-                Some((amt, _)) => amt,
-                None => return Err(TftpError::NoneFromSocket),
+            let amt = match conn.conn.recv_from(&mut buf) {
+                Ok((amt, _)) => amt,
+                Err(_) => return Err(TftpError::NoneFromSocket),
             };
             let packet = Packet::read(PacketData::new(buf, amt))?;
 
@@ -354,7 +376,8 @@ impl TftpServer {
 /// Creates a std::net::UdpSocket on a random open UDP port.
 /// The range of valid ports is from 0 to 65535 and if the function
 /// cannot find a open port within 100 different random ports it returns an error.
-pub fn create_socket(timeout: Option<Duration>) -> Result<net::UdpSocket> {
+pub fn create_socket(timeout: Option<Duration>, socket_addr: SocketAddr) -> Result<net::UdpSocket> {
+    let mut socket_addr = socket_addr;
     let mut num_failures = 0;
     let mut past_ports = HashMap::new();
     loop {
@@ -363,9 +386,7 @@ pub fn create_socket(timeout: Option<Duration>) -> Result<net::UdpSocket> {
         if past_ports.get(&port).is_some() {
             continue;
         }
-
-        let addr = format!("127.0.0.1:{}", port);
-        let socket_addr = SocketAddr::from_str(addr.as_str()).expect("Error parsing address");
+        socket_addr.set_port(port);
         match net::UdpSocket::bind(&socket_addr) {
             Ok(socket) => {
                 if let Some(timeout) = timeout {
